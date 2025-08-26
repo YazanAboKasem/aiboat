@@ -46,6 +46,116 @@ class QuestionController extends Controller
         $questions = Question::latest()->get();
         return view('questions.index', compact('questions'));
     }
+    public function updateWithChatGptAnswer(Request $request, EmbeddingService $svc, KeywordExtractorService $keywordExtractor)
+    {
+        // التحقق من صحة البيانات المدخلة
+        $validated = $request->validate([
+            'question_id' => 'required|exists:questions,id',
+            'chatgpt_answer' => 'required|string',
+            'keywords' => 'nullable|string',
+            'lex_map' => 'nullable|string',
+            'intent' => 'nullable|string',
+        ]);
+
+        // البحث عن السؤال المطلوب باستخدام معرّف السؤال
+        $question = \App\Models\Question::findOrFail($validated['question_id']);
+        $question->answer = $validated['chatgpt_answer'];
+
+        // استخراج الكلمات المفتاحية المدخلة أو باستخدام الخدمة
+        $providedKeywords = !empty($validated['keywords'])
+            ? $this->parseKeywordString($validated['keywords'])
+            : [];
+        $extractedKeywords = empty($providedKeywords)
+            ? $keywordExtractor->extract($question->title)
+            : [];
+        $keywords = array_unique(array_merge($providedKeywords, $extractedKeywords));
+
+        // استخراج قاموس المرادفات المدخل أو باستخدام الخدمة
+        $providedLexMap = !empty($validated['lex_map'])
+            ? $this->parseLexMapString($validated['lex_map'])
+            : [];
+        $extractedLexMap = empty($providedLexMap)
+            ? $keywordExtractor->generateLexMap($question->title)
+            : [];
+        $lexMap = array_merge($providedLexMap, $extractedLexMap);
+
+        // تحديث البيانات
+        $question->keywords = $keywords;
+        $question->lex_map = $lexMap;
+
+        // تحديث النية إذا تم توفيرها
+        if (!empty($validated['intent'])) {
+            $question->intent = $validated['intent'];
+        }
+
+        // بناء الـ embeddings بناءً على عنوان السؤال ومحتواه
+        $question->title_embedding = $svc->embed($question->title);
+        $question->content_embedding = $svc->embed($question->content);
+        $question->embedding_quality = 1.0;
+
+        // حفظ التغييرات
+        $question->save();
+
+        // إعادة استجابة JSON إيجابية
+        return response()->json([
+            'status' => 'success',
+            'message' => 'تم تحديث الإجابة والكلمات المفتاحية بنجاح',
+            'data' => [
+                'id' => $question->id,
+                'title' => $question->title,
+                'answer' => $question->answer,
+                'keywords' => $question->keywords,
+                'lex_map' => $question->lex_map,
+                'intent' => $question->intent,
+            ],
+        ]);
+    }
+
+    /**
+     * تحويل نص الكلمات المفتاحية إلى مصفوفة
+     */
+    private function parseKeywordString(?string $keywordsStr): array
+    {
+        if (empty($keywordsStr)) return [];
+
+        // تقبل أسطر أو فواصل
+        $keywordsStr = str_replace(["\r\n", "\r"], "\n", $keywordsStr);
+        $parts = preg_split('/[\n,]+/u', $keywordsStr);
+
+        $keywords = [];
+        foreach ($parts as $part) {
+            $part = trim($part);
+            if (!empty($part)) {
+                $keywords[] = $part;
+            }
+        }
+
+        return array_unique($keywords);
+    }
+
+    /**
+     * تحويل نص قاموس المرادفات إلى مصفوفة ترابطية
+     */
+    private function parseLexMapString(?string $lexMapStr): array
+    {
+        if (empty($lexMapStr)) return [];
+
+        $lexMapStr = str_replace(["\r\n", "\r"], "\n", $lexMapStr);
+        $lines = explode("\n", $lexMapStr);
+
+        $lexMap = [];
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (empty($line) || !str_contains($line, '=')) continue;
+
+            [$from, $to] = array_map('trim', explode('=', $line, 2));
+            if (!empty($from) && !empty($to)) {
+                $lexMap[$from] = $to;
+            }
+        }
+
+        return $lexMap;
+    }
 
     /**
      * Show the form for creating a new question.

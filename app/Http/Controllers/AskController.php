@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Models\Question;
+use App\Services\ChatGptService;
 use App\Services\EmbeddingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -16,7 +17,7 @@ class AskController extends Controller
      * POST /api/ask
      * Body: { "q": "..." } أو { "question": "..." }
      */
-    public function ask(Request $request, EmbeddingService $svc): JsonResponse
+    public function ask(Request $request, EmbeddingService $svc, ChatGptService $chatGpt): JsonResponse
     {
         $userText = $request->input('q') ?? $request->input('question');
 
@@ -24,16 +25,31 @@ class AskController extends Controller
             return response()->json(['error' => 'الرجاء إرسال الحقل q (أو question) بنص صحيح.'], 422);
         }
 
-        // 1) Embedding لسؤال المستخدم
+        // 1) جلب المرشحين والأسئلة مع قاموس الاستبدال الخاص بكل سؤال
+        $candidates = Question::where(function ($q) {
+            $q->whereNotNull('title_embedding')
+                ->orWhereNotNull('content_embedding');
+        })->get(['id', 'title', 'content', 'lex_map']);
+
+        // 2) تطبيق قاموس الاستبدال (lex_map) المتوفر لكل سؤال على النص المستخدم
+        foreach ($candidates as $candidate) {
+            $lexMap = is_array($candidate->lex_map) ? $candidate->lex_map : [];
+            if (!empty($lexMap)) {
+                $userText = $this->applyLexMap($userText, $lexMap);
+            }
+        }
+
+        // 3) استخراج التضمين للسؤال بعد الاستبدال
         try {
             $userEmbedding = $svc->embed($userText);
         } catch (Throwable $e) {
             Log::error('Embedding API failed for /api/ask', ['error' => $e->getMessage()]);
             return response()->json([
-                'error'   => 'تعذّر الاتصال بمحرك الـ Embeddings حالياً.',
-                'details' => 'تأكد من OPENAI_API_KEY و OPENAI_EMBED_MODEL ثم أعد المحاولة.'
+                'error'   => 'تعذّر الاتصال بمحرك التضمين حاليًا.',
+                'details' => 'تأكد من إعدادات المفتاح API وجرب مرة أخرى.'
             ], 502);
         }
+
 
         if (!is_array($userEmbedding) || count($userEmbedding) === 0) {
             return response()->json(['error' => 'لم أتمكن من توليد تمثيل دلالي للسؤال المُرسَل.'], 400);
@@ -130,8 +146,9 @@ class AskController extends Controller
         // 4) ترتيب تنازلي
         usort($topK, fn ($a, $b) => $b['similarity'] <=> $a['similarity']);
 
-        // 5) عتبة منطقية بعد التطبيع (جرّب 0.80–0.86)
-        $THRESHOLD = 0.52;
+        // 5) عتبة منطقية بعد التطبيع
+        $THRESHOLD = 0.65;
+        $CHATGPT_THRESHOLD = 0.65; // عتبة الإرسال إلى ChatGPT إذا كانت نسبة المطابقة أقل من 65%
         $best = $topK[0];
 
         if ($best['similarity'] >= $THRESHOLD) {
@@ -144,6 +161,53 @@ class AskController extends Controller
             ], 200);
         }
 
+        // إذا كانت نسبة المطابقة أقل من 65%، نرسل السؤال والبيانات إلى ChatGPT
+        if ($best['similarity'] < $CHATGPT_THRESHOLD) {
+            try {
+                // تجميع البيانات ذات الصلة (أفضل 5 نتائج) لإرسالها إلى ChatGPT
+                $relatedData = array_slice($topK, 0, 5);
+
+                // الحصول على إجابة من ChatGPT
+                $chatGptResult = $chatGpt->getAnswer($userText, $relatedData);
+
+                // إذا كانت الثقة بالإجابة منخفضة أو تم تحديد أن الإجابة "غير موجودة"
+                if ($chatGptResult['confidence'] <= 0.0) {
+                    return response()->json([
+                        'match_question' => null,
+                        'answer'         => null,
+                        'similarity'     => $best['similarity'],
+                        'parts'          => $best['parts'],
+                        'suggestions'    => array_slice($topK, 0, 5),
+                        'message'        => 'لم أجد تطابقًا بثقة كافية، وليست هناك إجابة واضحة في قاعدة البيانات.',
+                    ], 200);
+                }
+
+                // تم العثور على إجابة من ChatGPT
+                return response()->json([
+                    'match_question' => null,
+                    'answer'         => $chatGptResult['answer'],
+                    'similarity'     => $best['similarity'],
+                    'parts'          => $best['parts'],
+                    'source'         => $chatGptResult['source'],
+                    'suggestions'    => array_slice($topK, 0, 5),
+                ], 200);
+
+            } catch (Throwable $e) {
+                Log::error('ChatGPT API failed', ['error' => $e->getMessage()]);
+
+                // في حالة فشل الاتصال بـ ChatGPT، نعود إلى السلوك الافتراضي
+                return response()->json([
+                    'match_question' => null,
+                    'answer'         => null,
+                    'similarity'     => $best['similarity'],
+                    'parts'          => $best['parts'],
+                    'suggestions'    => array_slice($topK, 0, 5),
+                    'message'        => 'لم أجد تطابقًا بثقة كافية، وتعذر الاتصال بمساعد الذكاء الاصطناعي.',
+                ], 200);
+            }
+        }
+
+        // السلوك الافتراضي إذا لم نتمكن من العثور على تطابق بثقة كافية ولكن لم نصل لمرحلة الإرسال إلى ChatGPT
         return response()->json([
             'match_question' => null,
             'answer'         => null,
@@ -197,25 +261,6 @@ class AskController extends Controller
         return $hits / (count($A) + count($B) - $hits); // Jaccard
     }
 
-    /** كشف نية تقريبية بالكلمات الدالة (boost بسيط) */
-    private function detectIntent(string $text): ?string
-    {
-        $lex = [
-            'location' => ['اين','وين','موقع','مكان','خريطه','خارطه','map','لوكيشن','location','pin'],
-            'access'   => ['الوصول','اوصل','كيف اصل','كيف اروح','كيف اوصل','طريق','الطريق','اتجاه','اتجاهات','directions','route','مسار','الدخول','الطرق','اقرب'],
-            'time'     => ['متى','اوقات','وقت','ساعات','مواعيد','يفتح','يبدأ','يغلق'],
-            'price'    => ['كم','سعر','اسعار','التذاكر','ثمن','رسوم'],
-        ];
-        $t = $this->normalizeAr(mb_strtolower($text));
-        $best = null; $hits = 0;
-        foreach ($lex as $intent => $words) {
-            $c = 0; foreach ($words as $w) if (str_contains($t, $w)) $c++;
-            if ($c > $hits) { $hits = $c; $best = $intent; }
-        }
-        return $hits > 0 ? $best : null;
-    }
-
-    /** Boost بسيط للكلمات المفتاحية: 0..1 صغيرة */
     private function keywordsBoost(string $userTextNorm, array $keywords): float
     {
         if (empty($keywords)) return 0.0;
@@ -235,5 +280,214 @@ class AskController extends Controller
         if ($hits === 0) return 0.0;
         // سقف بسيط: كلمة واحدة = 0.5، كلمتان فأكثر = 1.0
         return $hits === 1 ? 0.5 : 1.0;
+    }
+
+    /**
+     * تحديث سؤال موجود أو إنشاء سؤال جديد بإجابة من ChatGPT
+     * وإضافة الكلمات المفتاحية وقاموس المرادفات
+     */
+    public function updateWithChatGptAnswer(Request $request)
+    {
+        $validated = $request->validate([
+            'original_question' => 'required|string|max:255',
+            'chatgpt_answer'    => 'required|string',
+            'keywords'          => 'nullable|string',
+            'lex_map'           => 'nullable|string',
+            'intent'            => 'nullable|string',
+        ]);
+
+        // استخراج الكلمات المفتاحية من السؤال الأصلي إذا لم يتم توفيرها
+        $providedKeywords = !empty($validated['keywords'])
+            ? $this->parseKeywordString($validated['keywords'])
+            : [];
+
+        // استخراج كلمات مفتاحية تلقائيًا إذا لم يتم توفير أي كلمات
+        $extractedKeywords = empty($providedKeywords)
+            ? $this->keywordExtractor->extract($validated['original_question'])
+            : [];
+
+        // دمج الكلمات المفتاحية
+        $keywords = array_unique(array_merge($providedKeywords, $extractedKeywords));
+
+        // استخراج قاموس المرادفات من السؤال إذا لم يتم توفيره
+        $providedLexMap = !empty($validated['lex_map'])
+            ? $this->parseLexMapString($validated['lex_map'])
+            : [];
+
+        // استخراج قاموس مرادفات تلقائيًا إذا لم يتم توفير أي قاموس
+        $extractedLexMap = empty($providedLexMap)
+            ? $this->keywordExtractor->generateLexMap($validated['original_question'])
+            : [];
+
+        // دمج قواميس المرادفات
+        $lexMap = array_merge($providedLexMap, $extractedLexMap);
+
+        // نوع السؤال (intent)
+        $intent = $validated['intent'] ?? $this->detectIntent($validated['original_question']);
+
+        // البحث عن سؤال موجود بنفس العنوان
+        $existingQuestion = Question::where('title', $validated['original_question'])->first();
+
+        try {
+            if ($existingQuestion) {
+                // دمج الكلمات المفتاحية والمرادفات مع البيانات الموجودة
+                $currentKeywords = $existingQuestion->keywords ?? [];
+                if (!is_array($currentKeywords)) {
+                    $currentKeywords = [];
+                }
+
+                $currentLexMap = $existingQuestion->lex_map ?? [];
+                if (!is_array($currentLexMap)) {
+                    $currentLexMap = [];
+                }
+
+                $mergedKeywords = array_unique(array_merge($currentKeywords, $keywords));
+                $mergedLexMap = array_merge($currentLexMap, $lexMap);
+
+                // تحديث السؤال الموجود
+                $existingQuestion->update([
+                    'answer' => $validated['chatgpt_answer'],
+                    'keywords' => $mergedKeywords,
+                    'lex_map' => $mergedLexMap,
+                    'intent' => $intent ?? $existingQuestion->intent,
+                ]);
+
+                // تحديث الـ embeddings
+                $this->updateEmbeddings($existingQuestion);
+
+                $updatedQuestion = $existingQuestion;
+
+            } else {
+                // إنشاء سؤال جديد
+                $newQuestion = Question::create([
+                    'title' => $validated['original_question'],
+                    'content' => $validated['original_question'],
+                    'answer' => $validated['chatgpt_answer'],
+                    'keywords' => $keywords,
+                    'lex_map' => $lexMap,
+                    'intent' => $intent,
+                ]);
+
+                // إنشاء الـ embeddings
+                $this->updateEmbeddings($newQuestion);
+
+                $updatedQuestion = $newQuestion;
+            }
+
+            // تسجيل للمراقبة والتأكد من حفظ البيانات
+            \Illuminate\Support\Facades\Log::info('Question updated with ChatGPT answer', [
+                'id' => $updatedQuestion->id,
+                'title' => $updatedQuestion->title,
+                'keywords_count' => count($updatedQuestion->keywords ?? []),
+                'lex_map_count' => count($updatedQuestion->lex_map ?? []),
+            ]);
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'تم تحديث السؤال أو إضافته بنجاح',
+                'question_id' => $updatedQuestion->id,
+                'keywords' => $updatedQuestion->keywords,
+                'lex_map' => $updatedQuestion->lex_map,
+                'intent' => $updatedQuestion->intent,
+            ]);
+
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error updating question with ChatGPT answer', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'original_question' => $validated['original_question']
+            ]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'حدث خطأ أثناء تحديث السؤال: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * محاولة كشف نية السؤال (intent) تلقائيًا
+     */
+    private function detectIntent(string $question): ?string
+    {
+        $question = mb_strtolower($question);
+
+        // كلمات مفتاحية لكل نية
+        $intentKeywords = [
+            'location' => ['وين', 'أين', 'فين', 'مكان', 'موقع', 'عنوان', 'المدينة', 'الحي', 'شارع'],
+            'time' => ['متى', 'وقت', 'ساعة', 'توقيت', 'مواعيد', 'فتح', 'إغلاق', 'يفتح', 'يغلق', 'دوام'],
+            'price' => ['كم', 'سعر', 'تكلفة', 'تكلف', 'ثمن', 'ريال', 'جنيه', 'دولار', 'يكلف'],
+            'access' => ['كيف', 'أصل', 'وصول', 'طريق', 'باص', 'سيارة', 'مترو', 'محطة', 'اتجاه', 'نصل', 'يوصل'],
+        ];
+
+        // حساب عدد الكلمات المطابقة لكل نية
+        $matches = [];
+        foreach ($intentKeywords as $intent => $keywords) {
+            $count = 0;
+            foreach ($keywords as $keyword) {
+                if (mb_strpos($question, $keyword) !== false) {
+                    $count++;
+                }
+            }
+            $matches[$intent] = $count;
+        }
+
+        // ترتيب النوايا حسب عدد المطابقات
+        arsort($matches);
+
+        // إذا وجدت مطابقة واحدة على الأقل
+        foreach ($matches as $intent => $count) {
+            if ($count > 0) {
+                return $intent;
+            }
+        }
+
+        return null; // لا توجد نية واضحة
+    }
+
+    /**
+     * تحويل نص الكلمات المفتاحية إلى مصفوفة
+     */
+    private function parseKeywordString(?string $keywordsStr): array
+    {
+        if (empty($keywordsStr)) return [];
+
+        // تقبل أسطر أو فواصل
+        $keywordsStr = str_replace(["\r\n", "\r"], "\n", $keywordsStr);
+        $parts = preg_split('/[\n,]+/u', $keywordsStr);
+
+        $keywords = [];
+        foreach ($parts as $part) {
+            $part = trim($part);
+            if (!empty($part)) {
+                $keywords[] = $part;
+            }
+        }
+
+        return array_unique($keywords);
+    }
+
+    /**
+     * تحويل نص قاموس المرادفات إلى مصفوفة ترابطية
+     */
+    private function parseLexMapString(?string $lexMapStr): array
+    {
+        if (empty($lexMapStr)) return [];
+
+        $lexMapStr = str_replace(["\r\n", "\r"], "\n", $lexMapStr);
+        $lines = explode("\n", $lexMapStr);
+
+        $lexMap = [];
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (empty($line) || !str_contains($line, '=')) continue;
+
+            [$from, $to] = array_map('trim', explode('=', $line, 2));
+            if (!empty($from) && !empty($to)) {
+                $lexMap[$from] = $to;
+            }
+        }
+
+        return $lexMap;
     }
 }

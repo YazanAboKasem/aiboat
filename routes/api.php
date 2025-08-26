@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\QuestionController;
 use App\Services\AnswerService;
 use App\Services\RerankerService;
 use App\Services\RetrievalService;
@@ -45,6 +46,7 @@ Route::post('/retrieval-test', function (Request $request, RetrievalService $ret
 
 
 
+Route::post('/update-chatgpt-answer', [AskController::class, 'updateWithChatGptAnswer']);
 
 
 Route::post('/ask-hq', function (Request $req, RetrievalService $retrieval, AnswerService $ans, RerankerService $rerank) {

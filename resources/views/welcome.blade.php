@@ -195,7 +195,7 @@
             })() : '';
 
             el.innerHTML = `
-            <h4><span class="rank">1</span>${topPct!=null ? `أفضل تطابق (${topPct}%)` : 'أفضل تطابق'}</h4>
+            <h4><span class="rank">1</span>${topPct!=null ? `أفضل تطابقرر (${topPct}%)` : 'أفضل تطابق'}</h4>
             <div class="a">${escapeHtml(answer || '—')}</div>
             <div class="meta-line small muted">
                 ${source ? `المصدر: <span class="src">${escapeHtml(source)}</span>` : ''}

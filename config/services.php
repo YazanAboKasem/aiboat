@@ -1,7 +1,6 @@
 <?php
 
 return [
-
     /*
     |--------------------------------------------------------------------------
     | Third Party Services
@@ -13,6 +12,8 @@ return [
     | a conventional file to locate the various service credentials.
     |
     */
+
+
 
     'postmark' => [
         'token' => env('POSTMARK_TOKEN'),
@@ -28,11 +29,15 @@ return [
         'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
     ],
 
+    'openai' => [
+        'api_key' => env('OPENAI_API_KEY'),
+        'api_url' => env('OPENAI_API_URL', 'https://api.openai.com/v1/chat/completions'),
+    ],
+
     'slack' => [
         'notifications' => [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
     ],
-
 ];
