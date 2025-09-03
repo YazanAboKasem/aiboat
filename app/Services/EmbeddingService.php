@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class EmbeddingService
@@ -12,6 +13,8 @@ class EmbeddingService
 
     public function __construct(?string $apiKey = null, ?string $model = null)
     {
+        Log::info('OPENAI_API_KEY:', ['key' => env('OPENAI_API_KEY')]);
+
         $this->apiKey = $apiKey ?? config('services.openai.key', env('OPENAI_API_KEY'));
         $this->model  = $model  ?? env('OPENAI_EMBED_MODEL', 'text-embedding-3-large');
     }

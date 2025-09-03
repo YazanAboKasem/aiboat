@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Question;
 use App\Services\EmbeddingService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 class QuestionController extends Controller
 {
@@ -43,6 +44,8 @@ class QuestionController extends Controller
     }
     public function index()
     {
+        Log::info('META_APP_SECRET:', ['key' => env('META_APP_SECRET')]);
+
         $questions = Question::latest()->get();
         return view('questions.index', compact('questions'));
     }

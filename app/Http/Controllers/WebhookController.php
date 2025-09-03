@@ -16,6 +16,10 @@ class WebhookController extends Controller
 {
     public function handle(Request $request,EmbeddingService $svc, ChatGptService $chatGpt)
     {
+
+        $raw = $request->getContent();
+        Log::info('Webhook RAW', ['raw' => $raw]);
+
         // GET: verification
         if ($request->isMethod('get')) {
             $mode  = $request->query('hub.mode') ?? $request->query('hub_mode');
@@ -28,8 +32,7 @@ class WebhookController extends Controller
         }
 
         // POST: events
-        $raw = $request->getContent();
-        Log::info('Webhook RAW', ['raw' => $raw]);
+
 
         $payload = json_decode($raw, true) ?: $request->all();
         Log::info('Webhook DECODED', ['payload' => $payload]);
@@ -93,7 +96,52 @@ class WebhookController extends Controller
                     }
                 }
             }
-        } else {
+        }
+        if (($payload['object'] ?? '') === 'instagram') {
+            foreach ($payload['entry'] ?? [] as $entry) {
+                foreach (($entry['messaging'] ?? []) as $event) {
+                    $senderId = data_get($event, 'sender.id');
+
+                    // Ignore echo messages
+                    if (data_get($event, 'message.is_echo')) {
+                        Log::info('Skip echo event');
+                        continue;
+                    }
+
+                    // Handle text messages
+                    if ($text = data_get($event, 'message.text')) {
+                        Log::info('Instagram MSG text', compact('senderId', 'text'));
+
+                        try {
+                            $apiResponse = $this->ask($text, $svc, $chatGpt);
+                            $data = $apiResponse->getData(true); // Convert JSON to array
+
+                            if (isset($data['answer'])) {
+                                dump($data['answer']);
+                                $this->sendInstagramMessage($payload['entry'][0]['messaging'][0]['sender']['id'], $data['answer']);
+                            }
+                        } catch (\Throwable $e) {
+                            Log::error('Error processing API', ['error' => $e->getMessage()]);
+                        }
+
+                        continue;
+                    }
+
+                    // Handle attachments
+                    if ($attachments = data_get($event, 'message.attachments')) {
+                        foreach ((array) $attachments as $attachment) {
+                            $type = data_get($attachment, 'type');
+                            $url  = data_get($attachment, 'payload.url');
+                            Log::info('Instagram MSG attachment', compact('senderId', 'type', 'url'));
+                        }
+                        $this->sendMessage($senderId, "استلمت مرفق نوعه: " . data_get($attachments, '0.type', 'غير معروف'));
+                        continue;
+                    }
+                }
+            }
+        }
+
+        else {
             Log::warning('Unknown webhook object', ['object' => $payload['object'] ?? null]);
         }
 
@@ -261,6 +309,38 @@ class WebhookController extends Controller
         } else {
             Log::info('Send API ok', $resp->json());
         }
+    }
+    private function sendInstagramMessage(string $igUserId, string $messageText): void
+    {
+        // مهم: هذا لازم يكون Page Access Token للصفحة المرتبطة بحساب إنستغرام
+        $pageAccessToken = env('META_PAGE_ACCESS_TOKEN');
+        if (!$pageAccessToken) {
+            Log::error('PAGE ACCESS TOKEN missing: set META_PAGE_ACCESS_TOKEN in .env');
+            return;
+        }
+
+        $endpoint = "https://graph.facebook.com/v21.0/me/messages";
+
+        $payload = [
+            'messaging_product' => 'instagram',        // ضروري لإنستغرام
+            'recipient'         => ['id' => $igUserId],// خُذها من sender.id في الويبهوك
+            'message'           => ['text' => $messageText],
+            // 'messaging_type'  => 'RESPONSE',         // عادة غير ضرورية مع IG؛ اتركها معلّقة
+            'access_token'      => $pageAccessToken,
+        ];
+
+        $resp = Http::asJson()->post($endpoint, $payload);
+
+        if ($resp->failed()) {
+            Log::error('IG Send API failed', [
+                'status'  => $resp->status(),
+                'body'    => $resp->body(),
+                'payload' => array_merge($payload, ['access_token' => '[redacted]']),
+            ]);
+            return;
+        }
+
+        Log::info('IG Send API ok', $resp->json());
     }
     public function ask( $q, EmbeddingService $svc, ChatGptService $chatGpt): JsonResponse
     {
