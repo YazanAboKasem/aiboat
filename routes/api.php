@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\MessagesController;
 use App\Http\Controllers\QuestionController;
 use App\Services\AnswerService;
 use App\Services\RerankerService;
@@ -22,33 +23,14 @@ use App\Http\Controllers\WebhookController;
 |
 */
 
-// Simple test route
-Route::get('test', function () {
-    return response('API routing test successfulvvv!', 200);
-});
-
+// طرق API العامة التي لا تتطلب مصادقة
 // Webhook routes
 Route::get('meta/webhook', [MetaWebhookController::class, 'verify']);
 Route::post('meta/webhook', [MetaWebhookController::class, 'receive']);
 Route::post('ask', [AskController::class, 'ask']);
+Route::match(['get','post'], 'webhook', [WebhookController::class, 'handle']);
 
-
-// routes/api.php
-
-Route::match(['get','post'], 'webhook', [WebhookController::class, 'handle']); // بدون '/'
-Route::post('/retrieval-test', function (Request $request, RetrievalService $retrieval) {
-    $q = (string) $request->input('q', '');
-    if ($q === '') return response()->json(['error' => 'q is required'], 422);
-
-    $top = $retrieval->topK($q, 5); // رجّع أقرب 5 مقاطع
-    return response()->json(['query' => $q, 'results' => $top], 200);
-});
-
-
-
-Route::post('/update-chatgpt-answer', [AskController::class, 'updateWithChatGptAnswer']);
-
-
+// طرق البحث والاستعلام العامة
 Route::post('/ask-hq', function (Request $req, RetrievalService $retrieval, AnswerService $ans, RerankerService $rerank) {
     $q = (string)$req->input('q', '');
     if ($q === '') return response()->json(['error'=>'q is required'], 422);
@@ -230,4 +212,24 @@ Route::post('/ask-hq', function (Request $req, RetrievalService $retrieval, Answ
         'match_percent' => $top3[0]['match_percent'] ?? null,
         'results'  => $top3,
     ], 200);
+});
+
+// طرق API المحمية (تتطلب مصادقة)
+Route::middleware('auth:sanctum')->group(function () {
+    // Simple test route
+    Route::get('test', function () {
+        return response('API routing test successful!', 200);
+    });
+
+    // طرق الاختبار والإدارة
+    Route::post('/retrieval-test', function (Request $request, RetrievalService $retrieval) {
+        $q = (string) $request->input('q', '');
+        if ($q === '') return response()->json(['error' => 'q is required'], 422);
+
+        $top = $retrieval->topK($q, 5); // رجّع أقرب 5 مقاطع
+        return response()->json(['query' => $q, 'results' => $top], 200);
+    });
+
+    // تحديث الإجابات
+    Route::post('/update-chatgpt-answer', [AskController::class, 'updateWithChatGptAnswer']);
 });

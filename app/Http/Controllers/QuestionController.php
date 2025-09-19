@@ -10,6 +10,10 @@ use Illuminate\Support\Facades\Log;
 class QuestionController extends Controller
 {
     /**
+     * تطبيق وسائط المصادقة على المتحكم
+     */
+
+    /**
      * Display a listing of the questions.
      */
     private function parseKeywords(?string $raw): array

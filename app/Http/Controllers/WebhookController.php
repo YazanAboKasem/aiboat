@@ -53,20 +53,31 @@ class WebhookController extends Controller
                     if ($text = data_get($ev, 'message.text')) {
                         Log::info('MSG texttt', compact('senderId','text'));
 
-                        // ابحث عن إجابة من قاعدة المعرفة
+                        // حفظ الرسالة في قاعدة البيانات
+                        \App\Models\Message::create([
+                            'sender_id' => $senderId,
+                            'message' => $text,
+                            'source' => 'facebook',
+                            'is_reply' => false,
+                        ]);
 
+                        // ابحث عن إجابة من قاعدة المعرفة
                         $apiResponse = $this->ask($text,$svc,$chatGpt);
-                       // Log::info('$apiResponse text', compact('apiResponse',$apiResponse));
+                        // Log::info('$apiResponse text', compact('apiResponse',$apiResponse));
 
                         $data = $apiResponse->getData(true); // تحويل JSON إلى مصفوفة
 
                         if (isset($data['answer'])) {
-
                             $this->sendMessage($senderId, $data['answer']);
+
+                            // حفظ الرد في قاعدة البيانات
+                            \App\Models\Message::create([
+                                'sender_id' => $senderId,
+                                'message' => $data['answer'],
+                                'source' => 'facebook',
+                                'is_reply' => true,
+                            ]);
                         }
-
-
-
 
 //                        $answer = $this->answerForMessage($text);
 //                        if ($answer) {
@@ -83,8 +94,29 @@ class WebhookController extends Controller
                             $type = data_get($att, 'type');
                             $url  = data_get($att, 'payload.url');
                             Log::info('MSG attachment', compact('senderId','type','url'));
+
+                            // حفظ المرفق في قاعدة البيانات
+                            \App\Models\Message::create([
+                                'sender_id' => $senderId,
+                                'message' => "مرفق من نوع: $type",
+                                'source' => 'facebook',
+                                'is_reply' => false,
+                                'attachment_url' => $url,
+                                'attachment_type' => $type,
+                            ]);
                         }
-                        $this->sendMessage($senderId, "استلمت مرفق نوعه: ".data_get($atts, '0.type', 'غير معروف'));
+
+                        $responseText = "استلمت مرفق نوعه: ".data_get($atts, '0.type', 'غير معروف');
+                        $this->sendMessage($senderId, $responseText);
+
+                        // حفظ الرد في قاعدة البيانات
+                        \App\Models\Message::create([
+                            'sender_id' => $senderId,
+                            'message' => $responseText,
+                            'source' => 'facebook',
+                            'is_reply' => true,
+                        ]);
+
                         continue;
                     }
 
@@ -110,15 +142,42 @@ class WebhookController extends Controller
 
                     // Handle text messages
                     if ($text = data_get($event, 'message.text')) {
+
+                        Log::info('chike message skipped', ['mid' => data_get($event, 'message.mid')]);
+
+                        if (\App\Models\Message::where('ms_id', data_get($event, 'message.mid'))->exists()) {
+                            Log::info('Duplicate message skipped', ['mid' => data_get($event, 'message.mid')]);
+                            continue;
+                        }
                         Log::info('Instagram MSG text', compact('senderId', 'text'));
+
+                        // حفظ الرسالة الواردة من إنستغرام في قاعدة البيانات
+                        \App\Models\Message::create([
+                            'ms_id' => data_get($event, 'message.mid'),
+                            'sender_id' => $senderId,
+                            'message' => $text,
+                            'source' => 'instagram',
+                            'is_reply' => false,
+                        ]);
 
                         try {
                             $apiResponse = $this->ask($text, $svc, $chatGpt);
                             $data = $apiResponse->getData(true); // Convert JSON to array
 
                             if (isset($data['answer'])) {
-                                dump($data['answer']);
-                                $this->sendInstagramMessage($payload['entry'][0]['messaging'][0]['sender']['id'], $data['answer']);
+                                $answer = $data['answer'];
+                                $this->sendInstagramMessage($payload['entry'][0]['messaging'][0]['sender']['id'], $answer);
+
+                                Log::info('Webhook RAW', ['raw' => $raw]);
+
+                              //   حفظ الرد في قاعدة البيانات
+                                \App\Models\Message::create([
+                                    'ms_id' => data_get($event, 'message.mid'),
+                                    'sender_id' => $senderId,
+                                    'message' => $answer,
+                                    'source' => 'instagram',
+                                    'is_reply' => true,
+                                ]);
                             }
                         } catch (\Throwable $e) {
                             Log::error('Error processing API', ['error' => $e->getMessage()]);
@@ -137,6 +196,7 @@ class WebhookController extends Controller
                         $this->sendMessage($senderId, "استلمت مرفق نوعه: " . data_get($attachments, '0.type', 'غير معروف'));
                         continue;
                     }
+
                 }
             }
         }
@@ -342,37 +402,31 @@ class WebhookController extends Controller
 
         Log::info('IG Send API ok', $resp->json());
     }
-    public function ask( $q, EmbeddingService $svc, ChatGptService $chatGpt): JsonResponse
+    public function ask($q, EmbeddingService $svc, ChatGptService $chatGpt): JsonResponse
     {
-        $userText = $q;
+
+        $text = $q;
+        $translate_text = $chatGpt->translateTextV3($text,"ar");
+
+        $userText = $translate_text['data']['translations'][0]['translatedText'];
+        $userLang = $translate_text['data']['translations'][0]['detectedSourceLanguage'];
+        Log::error('translate question', [
+            'userQuestion' => $text
+        ]);
         if (!is_string($userText) || trim($userText) === '') {
             return response()->json(['error' => 'الرجاء إرسال الحقل q (أو question) بنص صحيح.'], 422);
         }
-        // 1) جلب المرشحين والأسئلة مع قاموس الاستبدال الخاص بكل سؤال
-        $candidates = Question::where(function ($q) {
-            $q->whereNotNull('title_embedding')
-                ->orWhereNotNull('content_embedding');
-        })->get(['id', 'title', 'content', 'lex_map']);
 
-        // 2) تطبيق قاموس الاستبدال (lex_map) المتوفر لكل سؤال على النص المستخدم
-        foreach ($candidates as $candidate) {
-            $lexMap = is_array($candidate->lex_map) ? $candidate->lex_map : [];
-            if (!empty($lexMap)) {
-                $userText = $this->applyLexMap($userText, $lexMap);
-            }
-        }
-
-        // 3) استخراج التضمين للسؤال بعد الاستبدال
+        // 1) Embedding لسؤال المستخدم
         try {
             $userEmbedding = $svc->embed($userText);
         } catch (Throwable $e) {
             Log::error('Embedding API failed for /api/ask', ['error' => $e->getMessage()]);
             return response()->json([
-                'error'   => 'تعذّر الاتصال بمحرك التضمين حاليًا.',
-                'details' => 'تأكد من إعدادات المفتاح API وجرب مرة أخرى.'
+                'error'   => 'تعذّر الاتصال بمحرك الـ Embeddings حالياً.',
+                'details' => 'تأكد من OPENAI_API_KEY و OPENAI_EMBED_MODEL ثم أعد المحاولة.'
             ], 502);
         }
-
 
         if (!is_array($userEmbedding) || count($userEmbedding) === 0) {
             return response()->json(['error' => 'لم أتمكن من توليد تمثيل دلالي للسؤال المُرسَل.'], 400);
@@ -463,74 +517,78 @@ class WebhookController extends Controller
                     'intent'   => $sim_i,
                     'keywords' => round($kwBoost, 4),
                 ],
+                // إضافة المعلومات التي سنحتاجها لإرسالها إلى ChatGPT
+                'content'    => $cand->content,
+                'keywords'   => $keywords,
             ];
         }
 
         // 4) ترتيب تنازلي
         usort($topK, fn ($a, $b) => $b['similarity'] <=> $a['similarity']);
 
-        // 5) عتبة منطقية بعد التطبيع
-        $THRESHOLD = 0.65;
-        $CHATGPT_THRESHOLD = 0.65; // عتبة الإرسال إلى ChatGPT إذا كانت نسبة المطابقة أقل من 65%
+        // 5) عتبة منطقية بعد التطبيع (جرّب 0.80–0.86)
+        $THRESHOLD = 0.70;
         $best = $topK[0];
 
         if ($best['similarity'] >= $THRESHOLD) {
+            $t_match_question = $chatGpt->translateTextV3($best['question'],$userLang);
+            $t_answer = $chatGpt->translateTextV3($best['answer'],$userLang);
+            $match_question = $t_match_question['data']['translations'][0]['translatedText'];
+            $answer=  $t_answer['data']['translations'][0]['translatedText'];
+
+            Log::error('ChatGPT vvvvvvvvAPI failed', [
+                'userLang' => $userLang,
+                'match_question' => $answer,
+            ]);
             return response()->json([
-                'match_question' => $best['question'],
-                'answer'         => $best['answer'],
+                'match_question' => $match_question,
+                'answer'         => $answer,
                 'similarity'     => $best['similarity'],
                 'parts'          => $best['parts'],
                 'alternatives'   => array_slice($topK, 1, 3),
             ], 200);
         }
 
-        // إذا كانت نسبة المطابقة أقل من 65%، نرسل السؤال والبيانات إلى ChatGPT
-        if ($best['similarity'] < $CHATGPT_THRESHOLD) {
-            try {
-                // تجميع البيانات ذات الصلة (أفضل 5 نتائج) لإرسالها إلى ChatGPT
-                $relatedData = array_slice($topK, 0, 5);
+        // إذا لم يتم العثور على تطابق كافٍ، سنرسل البيانات إلى ChatGPT
+        try {
+            // تحضير البيانات ذات الصلة لإرسالها إلى ChatGPT
+            // سنستخدم أفضل 5 مرشحين حسب درجة التشابه
+            $relatedData = [];
+            foreach (array_slice($topK, 0, 4) as $index => $candidate) {
+                $relatedData[] = [
+                    'id'       => $candidate['id'],
+                    'question' => $candidate['question'],
+                    'answer'   => $candidate['answer'],
+                    'content'  => $candidate['content'] ?? null,
+                    'keywords' => $candidate['keywords'] ?? [],
+                ];
+            }
 
-                // الحصول على إجابة من ChatGPT
-                $chatGptResult = $chatGpt->getAnswer($userText, $relatedData);
+            // استدعاء خدمة ChatGPT مع السؤال والبيانات ذات الصلة
+            $chatGptResult = $chatGpt->getAnswer($userText, $relatedData,$userLang);
 
-                // إذا كانت الثقة بالإجابة منخفضة أو تم تحديد أن الإجابة "غير موجودة"
-                if ($chatGptResult['confidence'] <= 0.0) {
-                    return response()->json([
-                        'match_question' => null,
-                        'answer'         => null,
-                        'similarity'     => $best['similarity'],
-                        'parts'          => $best['parts'],
-                        'suggestions'    => array_slice($topK, 0, 5),
-                        'message'        => 'لم أجد تطابقًا بثقة كافية، وليست هناك إجابة واضحة في قاعدة البيانات.',
-                    ], 200);
-                }
 
-                // تم العثور على إجابة من ChatGPT
+            // تحقق من وجود إجابة من ChatGPT
+            if (isset($chatGptResult['answer']) && !empty($chatGptResult['answer'])) {
+                // إرجاع الإجابة من ChatGPT
                 return response()->json([
                     'match_question' => null,
                     'answer'         => $chatGptResult['answer'],
-                    'similarity'     => $best['similarity'],
-                    'parts'          => $best['parts'],
-                    'source'         => $chatGptResult['source'],
+                    'similarity'     => $chatGptResult['confidence'] ?? 0,
+                    'source'         => $chatGptResult['source'] ?? 'AI-DB',
+                    'ai_generated'   => true,
                     'suggestions'    => array_slice($topK, 0, 5),
-                ], 200);
-
-            } catch (Throwable $e) {
-                Log::error('ChatGPT API failed', ['error' => $e->getMessage()]);
-
-                // في حالة فشل الاتصال بـ ChatGPT، نعود إلى السلوك الافتراضي
-                return response()->json([
-                    'match_question' => null,
-                    'answer'         => null,
-                    'similarity'     => $best['similarity'],
-                    'parts'          => $best['parts'],
-                    'suggestions'    => array_slice($topK, 0, 5),
-                    'message'        => 'لم أجد تطابقًا بثقة كافية، وتعذر الاتصال بمساعد الذكاء الاصطناعي.',
+                    'message'        => 'تم توليد الإجابة باستخدام الذكاء الاصطناعي.',
                 ], 200);
             }
+        } catch (Throwable $e) {
+            Log::error('ChatGPT API failed', [
+                'error' => $e->getMessage(),
+                'userQuestion' => $userText
+            ]);
         }
 
-        // السلوك الافتراضي إذا لم نتمكن من العثور على تطابق بثقة كافية ولكن لم نصل لمرحلة الإرسال إلى ChatGPT
+        // إذا فشلت عملية ChatGPT أو لم تُرجع إجابة، سنعود إلى الإجابة الأصلية
         return response()->json([
             'match_question' => null,
             'answer'         => null,
@@ -539,7 +597,207 @@ class WebhookController extends Controller
             'suggestions'    => array_slice($topK, 0, 5),
             'message'        => 'لم أجد تطابقًا بثقة كافية.',
         ], 200);
-    }
+    }    /** تحويل Cosine [-1..1] إلى [0..1] */
+
+//    public function ask( $q, EmbeddingService $svc, ChatGptService $chatGpt): JsonResponse
+//    {
+//        $userText = $q;
+//        if (!is_string($userText) || trim($userText) === '') {
+//            return response()->json(['error' => 'الرجاء إرسال الحقل q (أو question) بنص صحيح.'], 422);
+//        }
+//        // 1) جلب المرشحين والأسئلة مع قاموس الاستبدال الخاص بكل سؤال
+//        $candidates = Question::where(function ($q) {
+//            $q->whereNotNull('title_embedding')
+//                ->orWhereNotNull('content_embedding');
+//        })->get(['id', 'title', 'content', 'lex_map']);
+//
+//        // 2) تطبيق قاموس الاستبدال (lex_map) المتوفر لكل سؤال على النص المستخدم
+//        foreach ($candidates as $candidate) {
+//            $lexMap = is_array($candidate->lex_map) ? $candidate->lex_map : [];
+//            if (!empty($lexMap)) {
+//                $userText = $this->applyLexMap($userText, $lexMap);
+//            }
+//        }
+//
+//        // 3) استخراج التضمين للسؤال بعد الاستبدال
+//        try {
+//            $userEmbedding = $svc->embed($userText);
+//        } catch (Throwable $e) {
+//            Log::error('Embedding API failed for /api/ask', ['error' => $e->getMessage()]);
+//            return response()->json([
+//                'error'   => 'تعذّر الاتصال بمحرك التضمين حاليًا.',
+//                'details' => 'تأكد من إعدادات المفتاح API وجرب مرة أخرى.'
+//            ], 502);
+//        }
+//
+//
+//        if (!is_array($userEmbedding) || count($userEmbedding) === 0) {
+//            return response()->json(['error' => 'لم أتمكن من توليد تمثيل دلالي للسؤال المُرسَل.'], 400);
+//        }
+//
+//        // 2) اجلب المرشحين (مع الحقول الجديدة)
+//        $candidates = Question::where(function ($q) {
+//            $q->whereNotNull('title_embedding')
+//                ->orWhereNotNull('content_embedding');
+//        })
+//            ->get(['id','title','content','answer','intent',
+//                'title_embedding','content_embedding',
+//                'keywords','lex_map']);
+//
+//        if ($candidates->isEmpty()) {
+//            return response()->json([
+//                'match_question' => null,
+//                'answer'         => null,
+//                'similarity'     => 0,
+//                'message'        => 'لا توجد أسئلة مضمّنة بعد. شغّل: php artisan embeddings:backfill-questions'
+//            ], 200);
+//        }
+//
+//        // 3) اكتشاف نية تقريبية لعمل Boost في الترتيب
+//        $detectedIntent = $this->detectIntent($userText);
+//
+//        // أوزان المزج
+//        $alpha = 0.72; // دلالي
+//        $beta  = 0.13; // لغوي
+//        $gamma = 0.10; // Intent
+//        $delta = 0.05; // Keywords Boost
+//
+//        // نحضّر نسخة مطبّعة من نص المستخدم لاستخدامها في القياس اللفظي والكلمات المفتاحية
+//        $userNorm = $this->normalizeAr(mb_strtolower($userText));
+//
+//        $topK = [];
+//        foreach ($candidates as $cand) {
+//            // 3.1 عرض السؤال
+//            $displayQ = trim(implode(' — ', array_filter([
+//                is_string($cand->title) ? trim($cand->title) : null,
+//                is_string($cand->content) ? trim($cand->content) : null,
+//            ]))) ?: ($cand->title ?? '—');
+//
+//            // 3.2 تشابه دلالي (أعلى من العنوان/المحتوى) + تطبيع إلى [0..1]
+//            $cosTitle = (is_array($cand->title_embedding) && $cand->title_embedding)
+//                ? EmbeddingService::cosine($userEmbedding, $cand->title_embedding) : 0.0;
+//            $cosCont  = (is_array($cand->content_embedding) && $cand->content_embedding)
+//                ? EmbeddingService::cosine($userEmbedding, $cand->content_embedding) : 0.0;
+//
+//            $simTitle = $this->toUnit($cosTitle);
+//            $simCont  = $this->toUnit($cosCont);
+//            $sim_d    = max($simTitle, $simCont);
+//
+//            // 3.3 lex_map: استبدال ديناميكي قبل القياس اللفظي (على نسخة مؤقتة فقط)
+//            $lexMap = is_array($cand->lex_map) ? $cand->lex_map : [];
+//            $candBlobRaw = (($cand->title ?? '') . ' ' . ($cand->content ?? ''));
+//            $candNorm    = $this->normalizeAr(mb_strtolower($candBlobRaw));
+//
+//            if (!empty($lexMap)) {
+//                $userLex = $this->applyLexMap($userNorm, $lexMap);
+//                $candLex = $this->applyLexMap($candNorm, $lexMap);
+//            } else {
+//                $userLex = $userNorm;
+//                $candLex = $candNorm;
+//            }
+//
+//            // 3.4 تشابه لغوي بسيط (Jaccard) على النص الموحّد
+//            $sim_l = $this->lexicalOverlap($userLex, $candLex);
+//
+//            // 3.5 Intent boost
+//            $sim_i = ($detectedIntent && $cand->intent === $detectedIntent) ? 1.0 : 0.0;
+//
+//            // 3.6 Keywords boost
+//            $keywords = is_array($cand->keywords) ? $cand->keywords : [];
+//            $kwBoost  = $this->keywordsBoost($userLex, $keywords); // 0..1 صغير
+//
+//            // 3.7 الدرجة النهائية
+//            $score = $alpha*$sim_d + $beta*$sim_l + $gamma*$sim_i + $delta*$kwBoost;
+//
+//            $topK[] = [
+//                'id'         => $cand->id,
+//                'question'   => $displayQ,
+//                'answer'     => $cand->answer,
+//                'similarity' => round($score, 4),
+//                'parts'      => [
+//                    'semantic' => round($sim_d, 4),
+//                    'lexical'  => round($sim_l, 4),
+//                    'intent'   => $sim_i,
+//                    'keywords' => round($kwBoost, 4),
+//                ],
+//            ];
+//        }
+//
+//        // 4) ترتيب تنازلي
+//        usort($topK, fn ($a, $b) => $b['similarity'] <=> $a['similarity']);
+//
+//        // 5) عتبة منطقية بعد التطبيع
+//        $THRESHOLD = 0.65;
+//        $CHATGPT_THRESHOLD = 0.65; // عتبة الإرسال إلى ChatGPT إذا كانت نسبة المطابقة أقل من 65%
+//        $best = $topK[0];
+//
+//        if ($best['similarity'] >= $THRESHOLD) {
+//            return response()->json([
+//                'match_question' => $best['question'],
+//                'answer'         => $best['answer'],
+//                'similarity'     => $best['similarity'],
+//                'parts'          => $best['parts'],
+//                'alternatives'   => array_slice($topK, 1, 3),
+//            ], 200);
+//        }
+//
+//        // إذا كانت نسبة المطابقة أقل من 65%، نرسل السؤال والبيانات إلى ChatGPT
+//        if ($best['similarity'] < $CHATGPT_THRESHOLD) {
+//            try {
+//                // تجميع البيانات ذات الصلة (أفضل 5 نتائج) لإرسالها إلى ChatGPT
+//                $relatedData = array_slice($topK, 0, 5);
+//
+//                // الحصول على إجابة من ChatGPT
+//
+//                $chatGptResult = $chatGpt->getAnswer($userText, $relatedData);
+//
+//                // إذا كانت الثقة بالإجابة منخفضة أو تم تحديد أن الإجابة "غير موجودة"
+//                if ($chatGptResult['confidence'] <= 0.0) {
+//                    return response()->json([
+//                        'match_question' => null,
+//                        'answer'         => null,
+//                        'similarity'     => $best['similarity'],
+//                        'parts'          => $best['parts'],
+//                        'suggestions'    => array_slice($topK, 0, 5),
+//                        'message'        => 'لم أجد تطابقًا بثقة كافية، وليست هناك إجابة واضحة في قاعدة البيانات.',
+//                    ], 200);
+//                }
+//
+//                // تم العثور على إجابة من ChatGPT
+//                return response()->json([
+//                    'match_question' => null,
+//                    'answer'         => $chatGptResult['answer'],
+//                    'similarity'     => $best['similarity'],
+//                    'parts'          => $best['parts'],
+//                    'source'         => $chatGptResult['source'],
+//                    'suggestions'    => array_slice($topK, 0, 5),
+//                ], 200);
+//
+//            } catch (Throwable $e) {
+//                Log::error('ChatGPT API failed', ['error' => $e->getMessage()]);
+//
+//                // في حالة فشل الاتصال بـ ChatGPT، نعود إلى السلوك الافتراضي
+//                return response()->json([
+//                    'match_question' => null,
+//                    'answer'         => null,
+//                    'similarity'     => $best['similarity'],
+//                    'parts'          => $best['parts'],
+//                    'suggestions'    => array_slice($topK, 0, 5),
+//                    'message'        => 'لم أجد تطابقًا بثقة كافية، وتعذر الاتصال بمساعد الذكاء الاصطناعي.',
+//                ], 200);
+//            }
+//        }
+//
+//        // السلوك الافتراضي إذا لم نتمكن من العثور على تطابق بثقة كافية ولكن لم نصل لمرحلة الإرسال إلى ChatGPT
+//        return response()->json([
+//            'match_question' => null,
+//            'answer'         => null,
+//            'similarity'     => $best['similarity'],
+//            'parts'          => $best['parts'],
+//            'suggestions'    => array_slice($topK, 0, 5),
+//            'message'        => 'لم أجد تطابقًا بثقة كافية.',
+//        ], 200);
+//    }
 
     /** تحويل Cosine [-1..1] إلى [0..1] */
     private function toUnit(float $cos): float

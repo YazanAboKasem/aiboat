@@ -81,11 +81,17 @@
             <div class="chips" id="suggestionChips"></div>
         </div>
         <div id="extra" class="meta"></div>
+        <a href="{{ route('messages.index') }}" class="btn btn-primary btn-xl">
+            <i class="fa fa-comments"></i> Go to Messages
+        </a>
 
         <div class="admin-actions">
             <a href="{{ route('questions.index') }}"><button class="admin-button">إدارة الأسئلة</button></a>
             <a href="{{ route('questions.create') }}"><button class="admin-button">إضافة سؤال جديد</button></a>
         </div>
+        <a href="{{ route('messages.index') }}" class="btn btn-primary">
+            <i class="fa fa-comments"></i> Messages
+        </a>
     </div>
 </div>
 

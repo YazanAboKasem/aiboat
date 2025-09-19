@@ -1,12 +1,13 @@
 <?php
 
 namespace App\Services;
-
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+set_time_limit(120);
 
 class ChatGptService
 {
+
     private string $apiKey;
     private string $model;
     private int $maxTokens;
@@ -35,8 +36,52 @@ class ChatGptService
      * @return array ['answer' => string, 'source' => string, 'confidence' => float, 'keywords' => array, 'lex_map' => array]
      * @throws \Exception
      */
-    public function getAnswer(string $userQuestion, array $relatedData): array
+
+
+    function translateTextV3(string $text, string $targetLanguage, string $sourceLanguage = null)
     {
+        $apiKey = 'AIzaSyAjoPeCp9sRDbHYrQmTt-UVID3Llu9QZeE'; // تأكد من إدخال المفتاح الصحيح هنا
+        $projectId = 'weframe-434209'; // أضف معرّف المشروع في .env
+        $location = 'global'; // الموقع الافتراضي
+
+        $url = "https://translation.googleapis.com/language/translate/v2?key={$apiKey}";
+
+        $requestBody = [
+            'q' => [$text],
+            'target' => $targetLanguage,
+            "format"=> "text"
+        ];
+
+        if ($sourceLanguage) {
+            $requestBody['sourceLanguageCode'] = $sourceLanguage; // ضبط لغة المصدر إن وجدت
+        }
+
+        try {
+            // إرسال الطلب
+            $response = Http::withHeaders([
+                'Content-Type' => 'application/json',
+            ])->post($url, array_merge($requestBody, ['key' => $apiKey]));
+
+            // التأكد من الاستجابة
+            if ($response->successful()) {
+                return $response->json();
+            }
+
+            // تسجيل الخطأ إذا فشل الطلب
+            \Log::error('Translation API Error: ', $response->json());
+            return false;
+        } catch (\Exception $e) {
+            \Log::error('Translation API Exception: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    public function getAnswer(string $userQuestion, array $relatedData,string $lang): array
+    {
+        Log::error('CdddddddhatGPT API data', [
+            'error' => $userQuestion,
+            'userQuestion' => $userQuestion
+        ]);
         // تنسيق البيانات المرتبطة لتقديمها إلى ChatGPT
         $formattedData = $this->formatRelatedData($relatedData);
 
@@ -44,12 +89,12 @@ class ChatGptService
         $messages = [
             [
                 'role' => 'system',
-                'content' => "أنت مساعد محادثة مختص في الإجابة على الأسئلة بناءً على البيانات المقدمة فقط.\n\n" .
-                    "إرشادات هامة:\n" .
-                    "1. استخدم فقط المعلومات المقدمة في البيانات بشكل كامل.\n" .
-                    "2. عند صياغة الإجابة النهائية، حدد بصراحة الايديات المرفقة بالأسئلة التي استندت إليها لإنتاج الإجابة.\n" .
-                    "3. إذا كنت لا تستطيع الإجابة، أجب بـ \"غير موجود\".\n" .
-                    "4. قدم النتيجة بصيغة JSON بالشكل التالي:\n\n" .
+                'content' => "أنت مساعد محادثة مختص في الإجابة على الأسئلة بناءً على البيانات المقدمة فقط ويمنع منعا باتا تقديم اي معلومات خارج المعلومات المقدمة.\n\n" .
+                    "أنت مساعد محادثة متخصص. التعليمات الهامة:\n" .
+                    "1. جاوب فقط بناءً على البيانات المقدمة.\n" .
+                    "2. حدد لغة السؤال الموجودة في content (العربية أو الإنجليزية) وأجب بنفس اللغة.\n" .
+                    "3. إذا لم تتمكن من الإجابة بناءً على البيانات، استخدم النص: \"شكرا للتواصل سوف نجاوب على استفساراتك باقرب وقت\".\n" .
+                    "4. صياغة الإجابة تكون في صيغة JSON بالشكل التالي:\n\n" .
                     "{\n" .
                     "  \"answer\": \"الإجابة النهائية هنا\",\n" .
                     "  \"used_questions\": [\n" .
@@ -57,7 +102,8 @@ class ChatGptService
                     "    {\"id\": 2}\n" .
                     "  ]\n" .
                     "}\n\n" .
-                    "توضيح إضافي: أي أسئلة تشمل \"الموقع\" أو \"التوقيت\" المقصود بها هو موقع أو توقيت \"المهرجان\" الذي ننظمه. على سبيل المثال: \"أين موقعكم؟\" يعني \"أين موقع المهرجان؟\" و\"متى تفتحون؟\" تعني \"متى يفتح المهرجان؟\"."
+                    "توضيح إضافي: أي أسئلة تشمل \"الموقع\" أو \"التوقيت\" المقصود بها هو موقع أو توقيت \"المهرجان\" الذي ننظمه. على سبيل المثال: \"أين موقعكم؟\" يعني \"أين موقع المهرجان؟\" و\"متى تفتحون؟\" تعني \"متى يفتح المهرجان؟\".\n" .
+                    "5. حدد لغة المستخدم من السؤال المقدم وأجب بنفس اللغة بغض النظر عن لغة المحتوى المقدم لك. على سبيل المثال، إذا كان السؤال باللغة الإنجليزية، فيجب أن تكون الإجابة باللغة الإنجليزية حتى لو كانت البيانات المقدمة بالعربية أو أي لغة أخرى."
             ],
             [
                 'role' => 'user',
@@ -65,7 +111,6 @@ class ChatGptService
                     "البيانات المتاحة:\n$formattedData"
             ]
         ];
-
 
 
         try {
@@ -104,6 +149,7 @@ class ChatGptService
 
             // تحديث قاعدة البيانات إذا تم العثور على تطابق
             $lexMap = [];
+
             foreach ($usedQuestions as $usedQuestion) {
                 $question = \App\Models\Question::find($usedQuestion['id']);
                 if ($question) {
@@ -117,6 +163,13 @@ class ChatGptService
             }
 
 
+            $t_answer = $this->translateTextV3($answer,$lang);
+            $answer=  $t_answer['data']['translations'][0]['translatedText'];
+
+            Log::error('ChatGPT after translate', [
+                'error' => $result,
+                'userQuestion' => $userQuestion
+            ]);
             // إرجاع البيانات مع معرف السؤال المطابق
 
             return [

@@ -5,7 +5,7 @@ namespace Database\Seeders;
 use Illuminate\Database\Seeder;
 use App\Models\KbItem;
 
-class KnowledgeSeeder extends Seeder
+class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
@@ -18,5 +18,11 @@ class KnowledgeSeeder extends Seeder
                 'content' => "سؤال: {$row['question']}\nإجابة: {$row['answer']}",
             ]);
         }
+//        \App\Models\User::factory()->create([
+//            'name' => 'Admin',
+//            'email' => 'admin@example.com',
+//            'password' => bcrypt('123QWEDSJR$#'),
+//        ]);
+
     }
 }

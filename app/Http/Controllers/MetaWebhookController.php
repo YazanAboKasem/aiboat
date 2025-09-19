@@ -30,7 +30,8 @@ class MetaWebhookController extends Controller
     }
     public function ask(Request $request)
     {
-        return "fdfccc";
+        Log::error('قصفثقفثقفثقف');
+
         $q = trim((string) $request->input('message', ''));
         if ($q === '') {
             return response()->json(['error' => 'message is required'], 422);

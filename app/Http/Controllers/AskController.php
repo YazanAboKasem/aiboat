@@ -19,37 +19,28 @@ class AskController extends Controller
      */
     public function ask(Request $request, EmbeddingService $svc, ChatGptService $chatGpt): JsonResponse
     {
-        $userText = $request->input('q') ?? $request->input('question');
+
+        $text = $request->input('q') ?? $request->input('question');
+        $translate_text = $chatGpt->translateTextV3($text,"ar");
+
+        $userText = $translate_text['data']['translations'][0]['translatedText'];
+        $userLang = $translate_text['data']['translations'][0]['detectedSourceLanguage'];
+
 
         if (!is_string($userText) || trim($userText) === '') {
             return response()->json(['error' => 'الرجاء إرسال الحقل q (أو question) بنص صحيح.'], 422);
         }
 
-        // 1) جلب المرشحين والأسئلة مع قاموس الاستبدال الخاص بكل سؤال
-        $candidates = Question::where(function ($q) {
-            $q->whereNotNull('title_embedding')
-                ->orWhereNotNull('content_embedding');
-        })->get(['id', 'title', 'content', 'lex_map']);
-
-        // 2) تطبيق قاموس الاستبدال (lex_map) المتوفر لكل سؤال على النص المستخدم
-        foreach ($candidates as $candidate) {
-            $lexMap = is_array($candidate->lex_map) ? $candidate->lex_map : [];
-            if (!empty($lexMap)) {
-                $userText = $this->applyLexMap($userText, $lexMap);
-            }
-        }
-
-        // 3) استخراج التضمين للسؤال بعد الاستبدال
+        // 1) Embedding لسؤال المستخدم
         try {
             $userEmbedding = $svc->embed($userText);
         } catch (Throwable $e) {
             Log::error('Embedding API failed for /api/ask', ['error' => $e->getMessage()]);
             return response()->json([
-                'error'   => 'تعذّر الاتصال بمحرك التضمين حاليًا.',
-                'details' => 'تأكد من إعدادات المفتاح API وجرب مرة أخرى.'
+                'error'   => 'تعذّر الاتصال بمحرك الـ Embeddings حالياً.',
+                'details' => 'تأكد من OPENAI_API_KEY و OPENAI_EMBED_MODEL ثم أعد المحاولة.'
             ], 502);
         }
-
 
         if (!is_array($userEmbedding) || count($userEmbedding) === 0) {
             return response()->json(['error' => 'لم أتمكن من توليد تمثيل دلالي للسؤال المُرسَل.'], 400);
@@ -140,74 +131,81 @@ class AskController extends Controller
                     'intent'   => $sim_i,
                     'keywords' => round($kwBoost, 4),
                 ],
+                // إضافة المعلومات التي سنحتاجها لإرسالها إلى ChatGPT
+                'content'    => $cand->content,
+                'keywords'   => $keywords,
             ];
         }
 
         // 4) ترتيب تنازلي
         usort($topK, fn ($a, $b) => $b['similarity'] <=> $a['similarity']);
 
-        // 5) عتبة منطقية بعد التطبيع
-        $THRESHOLD = 0.65;
-        $CHATGPT_THRESHOLD = 0.65; // عتبة الإرسال إلى ChatGPT إذا كانت نسبة المطابقة أقل من 65%
+        // 5) عتبة منطقية بعد التطبيع (جرّب 0.80–0.86)
+        $THRESHOLD = 0.70;
         $best = $topK[0];
 
         if ($best['similarity'] >= $THRESHOLD) {
+
+
+            $t_match_question = $chatGpt->translateTextV3($best['question'],$userLang);
+            $t_answer = $chatGpt->translateTextV3($best['answer'],$userLang);
+            $match_question = $t_match_question['data']['translations'][0]['translatedText'];
+            $answer=  $t_answer['data']['translations'][0]['translatedText'];
+
+
+            Log::error('ChatGPT vvvvvvvvAPI failed', [
+                'userLang' => $userLang,
+                'match_question' => $answer,
+            ]);
             return response()->json([
-                'match_question' => $best['question'],
-                'answer'         => $best['answer'],
+                'match_question' => $match_question,
+                'answer'         => $answer,
                 'similarity'     => $best['similarity'],
                 'parts'          => $best['parts'],
                 'alternatives'   => array_slice($topK, 1, 3),
             ], 200);
         }
 
-        // إذا كانت نسبة المطابقة أقل من 65%، نرسل السؤال والبيانات إلى ChatGPT
-        if ($best['similarity'] < $CHATGPT_THRESHOLD) {
-            try {
-                // تجميع البيانات ذات الصلة (أفضل 5 نتائج) لإرسالها إلى ChatGPT
-                $relatedData = array_slice($topK, 0, 5);
+        // إذا لم يتم العثور على تطابق كافٍ، سنرسل البيانات إلى ChatGPT
+        try {
+            // تحضير البيانات ذات الصلة لإرسالها إلى ChatGPT
+            // سنستخدم أفضل 5 مرشحين حسب درجة التشابه
+            $relatedData = [];
+            foreach (array_slice($topK, 0, 12) as $index => $candidate) {
+                $relatedData[] = [
+                    'id'       => $candidate['id'],
+                    'question' => $candidate['question'],
+                    'answer'   => $candidate['answer'],
+                    'content'  => $candidate['content'] ?? null,
+                    'keywords' => $candidate['keywords'] ?? [],
+                ];
+            }
 
-                // الحصول على إجابة من ChatGPT
-                $chatGptResult = $chatGpt->getAnswer($userText, $relatedData);
+            // استدعاء خدمة ChatGPT مع السؤال والبيانات ذات الصلة
 
-                // إذا كانت الثقة بالإجابة منخفضة أو تم تحديد أن الإجابة "غير موجودة"
-                if ($chatGptResult['confidence'] <= 0.0) {
-                    return response()->json([
-                        'match_question' => null,
-                        'answer'         => null,
-                        'similarity'     => $best['similarity'],
-                        'parts'          => $best['parts'],
-                        'suggestions'    => array_slice($topK, 0, 5),
-                        'message'        => 'لم أجد تطابقًا بثقة كافية، وليست هناك إجابة واضحة في قاعدة البيانات.',
-                    ], 200);
-                }
+            $chatGptResult = $chatGpt->getAnswer($userText, $relatedData,$userLang);
 
-                // تم العثور على إجابة من ChatGPT
+            // تحقق من وجود إجابة من ChatGPT
+            if (isset($chatGptResult['answer']) && !empty($chatGptResult['answer'])) {
+                // إرجاع الإجابة من ChatGPT
                 return response()->json([
                     'match_question' => null,
                     'answer'         => $chatGptResult['answer'],
-                    'similarity'     => $best['similarity'],
-                    'parts'          => $best['parts'],
-                    'source'         => $chatGptResult['source'],
+                    'similarity'     => $chatGptResult['confidence'] ?? 0,
+                    'source'         => $chatGptResult['source'] ?? 'AI-DB',
+                    'ai_generated'   => true,
                     'suggestions'    => array_slice($topK, 0, 5),
-                ], 200);
-
-            } catch (Throwable $e) {
-                Log::error('ChatGPT API failed', ['error' => $e->getMessage()]);
-
-                // في حالة فشل الاتصال بـ ChatGPT، نعود إلى السلوك الافتراضي
-                return response()->json([
-                    'match_question' => null,
-                    'answer'         => null,
-                    'similarity'     => $best['similarity'],
-                    'parts'          => $best['parts'],
-                    'suggestions'    => array_slice($topK, 0, 5),
-                    'message'        => 'لم أجد تطابقًا بثقة كافية، وتعذر الاتصال بمساعد الذكاء الاصطناعي.',
+                    'message'        => 'تم توليد الإجابة باستخدام الذكاء الاصطناعي.',
                 ], 200);
             }
+        } catch (Throwable $e) {
+            Log::error('ChatGPT API failed', [
+                'error' => $e->getMessage(),
+                'userQuestion' => $userText
+            ]);
         }
 
-        // السلوك الافتراضي إذا لم نتمكن من العثور على تطابق بثقة كافية ولكن لم نصل لمرحلة الإرسال إلى ChatGPT
+        // إذا فشلت عملية ChatGPT أو لم تُرجع إجابة، سنعود إلى الإجابة الأصلية
         return response()->json([
             'match_question' => null,
             'answer'         => null,
@@ -216,9 +214,7 @@ class AskController extends Controller
             'suggestions'    => array_slice($topK, 0, 5),
             'message'        => 'لم أجد تطابقًا بثقة كافية.',
         ], 200);
-    }
-
-    /** تحويل Cosine [-1..1] إلى [0..1] */
+    }    /** تحويل Cosine [-1..1] إلى [0..1] */
     private function toUnit(float $cos): float
     {
         $x = ($cos + 1.0) / 2.0;
