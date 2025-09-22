@@ -128,6 +128,14 @@
                                         </div>
                                     </div>
                                 </a>
+                                <a href="{{ route('ai.settings') }}" class="btn btn-outline-success">
+                                    <i class="fas fa-cog me-2"></i> إعدادات الذكاء الاصطناعي
+                                    @if(isset($aiSettings))
+                                        <span class="badge bg-info ms-2">
+                                            {{ $aiSettings->where('key', 'ai_model')->first()->value === 'model_one' ? 'ChatGPT' : 'المساعد' }}
+                                        </span>
+                                    @endif
+                                </a>
                                 <a href="{{ route('messages.ask') }}" class="block p-5 bg-blue-50 hover:bg-blue-100 rounded-lg shadow-sm transition-colors">
                                     <div class="flex items-center">
                                         <div class="rounded-full bg-blue-100 p-3">
@@ -138,6 +146,9 @@
                                             <p class="text-gray-600 mt-1">تجربة الشات</p>
                                         </div>
                                     </div>
+                                </a>
+                                <a href="{{ route('second.assistant') }}" class="list-group-item list-group-item-action">
+                                    <i class="fas fa-robot"></i> إدارة المساعد الثاني
                                 </a>
                             </div>
                         </div>

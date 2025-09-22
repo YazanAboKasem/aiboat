@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Message;
 use App\Models\Question;
 use App\Services\ChatGptService;
 use App\Services\EmbeddingService;
@@ -65,7 +66,7 @@ class WebhookController extends Controller
                         $apiResponse = $this->ask($text,$svc,$chatGpt);
                         // Log::info('$apiResponse text', compact('apiResponse',$apiResponse));
 
-                        $data = $apiResponse->getData(true); // تحويل JSON إلى مصفوفة
+                        $data = $apiResponse->getData(true);
 
                         if (isset($data['answer'])) {
                             $this->sendMessage($senderId, $data['answer']);
@@ -96,6 +97,7 @@ class WebhookController extends Controller
                             Log::info('MSG attachment', compact('senderId','type','url'));
 
                             // حفظ المرفق في قاعدة البيانات
+
                             \App\Models\Message::create([
                                 'sender_id' => $senderId,
                                 'message' => "مرفق من نوع: $type",
@@ -168,16 +170,18 @@ class WebhookController extends Controller
                                 $answer = $data['answer'];
                                 $this->sendInstagramMessage($payload['entry'][0]['messaging'][0]['sender']['id'], $answer);
 
-                                Log::info('Webhook RAW', ['raw' => $raw]);
+                                Log::info('sendInstagramMessage', ['is send ' => $answer .$senderId ]);
 
                               //   حفظ الرد في قاعدة البيانات
-                                \App\Models\Message::create([
-                                    'ms_id' => data_get($event, 'message.mid'),
+                                Message::create([
+                                    'ms_id' => data_get($event, 'message.mid') . 1,
                                     'sender_id' => $senderId,
                                     'message' => $answer,
                                     'source' => 'instagram',
                                     'is_reply' => true,
                                 ]);
+                                Log::info('sendInstagramMessage', ['is send ' => $answer .$senderId ]);
+
                             }
                         } catch (\Throwable $e) {
                             Log::error('Error processing API', ['error' => $e->getMessage()]);
@@ -564,8 +568,26 @@ class WebhookController extends Controller
                 ];
             }
 
-            // استدعاء خدمة ChatGPT مع السؤال والبيانات ذات الصلة
-            $chatGptResult = $chatGpt->getAnswer($userText, $relatedData,$userLang);
+            $chatGptResult = app(AssistantController::class)->ask(new Request(['question' => $text]));
+
+            $chatGptResult = $chatGptResult->getData(true); // Ensure you extract the data first
+            $modelType = \App\Models\Setting::get('ai_model', 'assistant');
+            Log::info('modelType', [
+                'model Type' => $modelType
+            ]);
+            if ($modelType === 'model_one') {
+
+                $chatGptResult = $chatGpt->getAnswer($userText, $relatedData,$userLang);
+
+
+            } else {
+                // استخدام Assistant (النموذج الثاني)
+                $assistantResponse = app(AssistantController::class)->ask(new Request(['question' => $text]));
+                $chatGptResult = $assistantResponse->getData(true);
+
+
+            }
+
 
 
             // تحقق من وجود إجابة من ChatGPT
@@ -577,7 +599,7 @@ class WebhookController extends Controller
                     'similarity'     => $chatGptResult['confidence'] ?? 0,
                     'source'         => $chatGptResult['source'] ?? 'AI-DB',
                     'ai_generated'   => true,
-                    'suggestions'    => array_slice($topK, 0, 5),
+                    'suggestions'    => array_slice([0], 0, 5),
                     'message'        => 'تم توليد الإجابة باستخدام الذكاء الاصطناعي.',
                 ], 200);
             }

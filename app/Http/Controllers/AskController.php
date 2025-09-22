@@ -21,6 +21,8 @@ class AskController extends Controller
     {
 
         $text = $request->input('q') ?? $request->input('question');
+
+
         $translate_text = $chatGpt->translateTextV3($text,"ar");
 
         $userText = $translate_text['data']['translations'][0]['translatedText'];
@@ -170,20 +172,66 @@ class AskController extends Controller
         try {
             // تحضير البيانات ذات الصلة لإرسالها إلى ChatGPT
             // سنستخدم أفضل 5 مرشحين حسب درجة التشابه
-            $relatedData = [];
-            foreach (array_slice($topK, 0, 12) as $index => $candidate) {
-                $relatedData[] = [
-                    'id'       => $candidate['id'],
-                    'question' => $candidate['question'],
-                    'answer'   => $candidate['answer'],
-                    'content'  => $candidate['content'] ?? null,
-                    'keywords' => $candidate['keywords'] ?? [],
-                ];
-            }
+//            $relatedData = [];
+//            foreach (array_slice($topK, 0, 12) as $index => $candidate) {
+//                $relatedData[] = [
+//                    'id'       => $candidate['id'],
+//                    'question' => $candidate['question'],
+//                    'answer'   => $candidate['answer'],
+//                    'content'  => $candidate['content'] ?? null,
+//                    'keywords' => $candidate['keywords'] ?? [],
+//                ];
+//            }
 
             // استدعاء خدمة ChatGPT مع السؤال والبيانات ذات الصلة
+            Log::info('Assistant came successfully:', ['key' => $text]);
 
-            $chatGptResult = $chatGpt->getAnswer($userText, $relatedData,$userLang);
+           // $chatGptResult = $chatGpt->getAnswer($userText, $relatedData,$userLang);
+            $chatGptResult = app(AssistantController::class)->ask(new Request(['question' => $text]));
+            Log::info('Assistant came successfully:', ['key' => $chatGptResult]);
+
+            $responseData = $chatGptResult->getData(true); // Ensure you extract the data first
+
+            Log::info('ChatGPT Response dataffff:', [$responseData['answer']]);
+
+            if (isset($responseData['key'])) {
+                $value = $responseData['key'];
+                // Do something with $value
+            }
+
+            Log::info('Assistant came successfully:', ['key' => $chatGptResult]);
+            if (isset($responseData['answer']) && !empty($responseData['answer'])) {
+                // Now you can safely access the "answer" value
+                $answer = $responseData['answer'];
+            }
+
+// Check if the response contains data
+//            if ($chatGptResult->getStatusCode() !== 200 || !isset($chatGptResult->getData(true)['answer'])) {
+//                \Log::error('فشل الحصول على إجابة من المساعد: ', $chatGptResult->getData(true));
+//
+//                return back()->with('warning', 'لم يتم العثور على إجابة كافية، حاول مرة أخرى لاحقًا.');
+//            }
+
+// Retrieve the answer from the response
+            if (isset($responseData['answer']) && !empty($responseData['answer'])) {
+                $answer = $responseData['answer'];
+                \Log::info('Answer retrieved successfully.', ['answer' => $answer]);
+
+                // Return the response to the user
+                return response()->json([
+                    'status' => 'success',
+                    'answer' => $answer,
+                    'message' => 'تم توليد الإجابة بنجاح.',
+                ], 200);
+            } else {
+                \Log::warning('No answer found in ChatGPT response.', $responseData);
+
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'لم يتم العثور على إجابة كافية.',
+                ], 422);
+            }
+
 
             // تحقق من وجود إجابة من ChatGPT
             if (isset($chatGptResult['answer']) && !empty($chatGptResult['answer'])) {
@@ -191,10 +239,10 @@ class AskController extends Controller
                 return response()->json([
                     'match_question' => null,
                     'answer'         => $chatGptResult['answer'],
-                    'similarity'     => $chatGptResult['confidence'] ?? 0,
+//                    'similarity'     => $chatGptResult['confidence'] ?? 0,
                     'source'         => $chatGptResult['source'] ?? 'AI-DB',
                     'ai_generated'   => true,
-                    'suggestions'    => array_slice($topK, 0, 5),
+//                    'suggestions'    => array_slice($topK, 0, 5),
                     'message'        => 'تم توليد الإجابة باستخدام الذكاء الاصطناعي.',
                 ], 200);
             }
@@ -461,29 +509,5 @@ class AskController extends Controller
         }
 
         return array_unique($keywords);
-    }
-
-    /**
-     * تحويل نص قاموس المرادفات إلى مصفوفة ترابطية
-     */
-    private function parseLexMapString(?string $lexMapStr): array
-    {
-        if (empty($lexMapStr)) return [];
-
-        $lexMapStr = str_replace(["\r\n", "\r"], "\n", $lexMapStr);
-        $lines = explode("\n", $lexMapStr);
-
-        $lexMap = [];
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if (empty($line) || !str_contains($line, '=')) continue;
-
-            [$from, $to] = array_map('trim', explode('=', $line, 2));
-            if (!empty($from) && !empty($to)) {
-                $lexMap[$from] = $to;
-            }
-        }
-
-        return $lexMap;
     }
 }

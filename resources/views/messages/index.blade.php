@@ -41,7 +41,7 @@
                                         @foreach($conversations as $conversation)
                                             <tr>
                                                 <td>
-                                                    {{ $conversation->sender_id }}
+                                                    {{ $conversation->sender_name }}
                                                     @if(App\Models\Message::where('sender_id', $conversation->sender_id)->where('is_reply', false)->whereNull('read_at')->exists())
                                                         <span class="badge bg-danger">New</span>
                                                     @endif

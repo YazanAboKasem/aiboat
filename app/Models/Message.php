@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Http;
 
 class Message extends Model
 {
@@ -42,11 +43,43 @@ class Message extends Model
      */
     public static function getAllConversations()
     {
-        return self::selectRaw('sender_id, sender_name, source, MAX(created_at) as last_message_at, COUNT(*) as message_count')
+        $conversations = self::selectRaw('sender_id, sender_name, source, MAX(created_at) as last_message_at, COUNT(*) as message_count')
             ->groupBy('sender_id', 'sender_name', 'source')
             ->orderByDesc('last_message_at')
             ->get();
+
+        // التحقق من وجود اسم المرسل
+        foreach ($conversations as $conversation) {
+            // إذا كان اسم المرسل غير موجود، اجلبه من API
+            if (empty($conversation->sender_name)) {
+                $senderName = (new self)->getSenderName($conversation->sender_id);
+                $conversation->sender_name = $senderName;
+
+                // يتم تحديث الاسم في قاعدة البيانات لعدم إعادة طلبه لاحقًا من API
+                if ($senderName) {
+                    self::where('sender_id', $conversation->sender_id)->update(['sender_name' => $senderName]);
+                }
+            }
+        }
+
+        return $conversations;
     }
+    public function getSenderName($senderId)
+    {
+        $accessToken = env('META_PAGE_ACCESS_TOKEN'); // ضع رمز الوصول هنا أو في .env
+        $url = "https://graph.facebook.com/v15.0/{$senderId}?fields=name&access_token={$accessToken}";
+
+        $response = Http::get($url);
+
+        if ($response->ok()) {
+            return $response->json('name'); // استخراج اسم المرسل
+        }
+
+        // معالجة الخطأ
+        \Log::error('Error fetching sender name', ['response' => $response->body()]);
+        return null;
+    }
+
 
     /**
      * Check if there are unread messages from this sender

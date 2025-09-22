@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AssistantController;
 use App\Http\Controllers\MessagesController;
 use App\Http\Controllers\QuestionController;
 use App\Services\AnswerService;
@@ -25,6 +26,8 @@ use App\Http\Controllers\WebhookController;
 
 // طرق API العامة التي لا تتطلب مصادقة
 // Webhook routes
+Route::post('/assistant/ask', [AssistantController::class, 'ask'])->name('assistant_ask');
+
 Route::get('meta/webhook', [MetaWebhookController::class, 'verify']);
 Route::post('meta/webhook', [MetaWebhookController::class, 'receive']);
 Route::post('ask', [AskController::class, 'ask']);
